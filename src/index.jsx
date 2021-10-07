@@ -1,3 +1,5 @@
+import testLink from './testLink';
+
 /*** SCHEMA ***/
 import {
   GraphQLSchema,
@@ -117,7 +119,7 @@ function App() {
   const {
     loading,
     data,
-  } = useQuery(ALL_PEOPLE);
+  } = useQuery(ALL_PEOPLE, { onError: (err) => alert(`Error! ${err.networkError?.message}`) });
 
   const [addPerson] = useMutation(ADD_PERSON, {
     update: (cache, { data: { addPerson: addPersonData } }) => {
@@ -175,7 +177,7 @@ function App() {
 
 const client = new ApolloClient({
   cache: new InMemoryCache(),
-  link
+  link: testLink,
 });
 
 render(
