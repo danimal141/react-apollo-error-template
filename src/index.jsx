@@ -1,188 +1,78 @@
-import testLink from './testLink';
-
-/*** SCHEMA ***/
-import {
-  GraphQLSchema,
-  GraphQLObjectType,
-  GraphQLID,
-  GraphQLString,
-  GraphQLList,
-} from 'graphql';
-const PersonType = new GraphQLObjectType({
-  name: 'Person',
-  fields: {
-    id: { type: GraphQLID },
-    name: { type: GraphQLString },
-  },
-});
-
-const peopleData = [
-  { id: 1, name: 'John Smith' },
-  { id: 2, name: 'Sara Smith' },
-  { id: 3, name: 'Budd Deey' },
-];
-
-const QueryType = new GraphQLObjectType({
-  name: 'Query',
-  fields: {
-    people: {
-      type: new GraphQLList(PersonType),
-      resolve: () => peopleData,
-    },
-  },
-});
-
-const MutationType = new GraphQLObjectType({
-  name: 'Mutation',
-  fields: {
-    addPerson: {
-      type: PersonType,
-      args: {
-        name: { type: GraphQLString },
-      },
-      resolve: function (_, { name }) {
-        const person = {
-          id: peopleData[peopleData.length - 1].id + 1,
-          name,
-        };
-
-        peopleData.push(person);
-        return person;
-      }
-    },
-  },
-});
-
-const schema = new GraphQLSchema({ query: QueryType, mutation: MutationType });
-
-/*** LINK ***/
-import { graphql, print } from "graphql";
-import { ApolloLink, Observable } from "@apollo/client";
-function delay(wait) {
-  return new Promise(resolve => setTimeout(resolve, wait));
-}
-
-const link = new ApolloLink(operation => {
-  return new Observable(async observer => {
-    const { query, operationName, variables } = operation;
-    await delay(300);
-    try {
-      const result = await graphql(
-        schema,
-        print(query),
-        null,
-        null,
-        variables,
-        operationName,
-      );
-      observer.next(result);
-      observer.complete();
-    } catch (err) {
-      observer.error(err);
-    }
-  });
-});
-
-/*** APP ***/
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { render } from "react-dom";
 import {
   ApolloClient,
-  ApolloProvider,
+  ApolloLink,
   InMemoryCache,
+  createHttpLink,
   gql,
-  useQuery,
-  useMutation,
 } from "@apollo/client";
-import "./index.css";
+import Pusher from "pusher-js";
+import PusherLink from "graphql-ruby-client/subscriptions/PusherLink";
 
-const ALL_PEOPLE = gql`
-  query AllPeople {
-    people {
-      id
-      name
-    }
-  }
-`;
+// Prepare test Pusher App
+// See: https://dashboard.pusher.com/apps/:app_id/keys
+const PUSHER_KEY = "PUSHER_KEY";
+const PUSHER_CLUSTER = "PUSHER_CLUSTER";
 
-const ADD_PERSON = gql`
-  mutation AddPerson($name: String) {
-    addPerson(name: $name) {
-      id
-      name
-    }
-  }
-`;
+const pusher = new Pusher(PUSHER_KEY, { cluster: PUSHER_CLUSTER });
+const pusherLink = new PusherLink({ pusher });
 
-function App() {
-  const [name, setName] = useState('');
-  const {
-    loading,
-    data,
-  } = useQuery(ALL_PEOPLE, { onError: (err) => alert(`Error! ${err.networkError?.message}`) });
+const httpLink = createHttpLink({
+  uri: `http://localhost/graphql`,
+  // return test data instead of requesting actually
+  // See: https://www.apollographql.com/docs/react/api/link/apollo-link-http/#fetch
+  fetch: (...req) => {
+    console.log(req);
 
-  const [addPerson] = useMutation(ADD_PERSON, {
-    update: (cache, { data: { addPerson: addPersonData } }) => {
-      const peopleResult = cache.readQuery({ query: ALL_PEOPLE });
+    const body = JSON.stringify({ data: {} });
+    const headers = new Headers({
+      "X-Subscription-ID": "test-subscription-id",
+    });
 
-      cache.writeQuery({
-        query: ALL_PEOPLE,
-        data: {
-          ...peopleResult,
-          people: [
-            ...peopleResult.people,
-            addPersonData,
-          ],
-        },
-      });
-    },
-  });
-
-  return (
-    <main>
-      <h1>Apollo Client Issue Reproduction</h1>
-      <p>
-        This application can be used to demonstrate an error in Apollo Client.
-      </p>
-      <div className="add-person">
-        <label htmlFor="name">Name</label>
-        <input
-          type="text"
-          name="name"
-          value={name}
-          onChange={evt => setName(evt.target.value)}
-        />
-        <button
-          onClick={() => {
-            addPerson({ variables: { name } });
-            setName('');
-          }}
-        >
-          Add person
-        </button>
-      </div>
-      <h2>Names</h2>
-      {loading ? (
-        <p>Loading…</p>
-      ) : (
-        <ul>
-          {data?.people.map(person => (
-            <li key={person.id}>{person.name}</li>
-          ))}
-        </ul>
-      )}
-    </main>
-  );
-}
+    return Promise.resolve(new Response(body, { headers }));
+  },
+});
 
 const client = new ApolloClient({
   cache: new InMemoryCache(),
-  link: testLink,
+  link: ApolloLink.from([pusherLink, httpLink]),
 });
 
-render(
-  <ApolloProvider client={client}>
-    <App />
-  </ApolloProvider>,
-  document.getElementById("root")
-);
+function App() {
+  const [events, setEvents] = useState([]);
+
+  useEffect(() => {
+    const POST_WAS_PUBLISHED = gql`
+      subscription {
+        postWasPublished {
+          body
+        }
+      }
+    `;
+
+    const subscription = client
+      .subscribe({
+        query: POST_WAS_PUBLISHED,
+      })
+      .subscribe({
+        next: (event) => {
+          console.log("event", event);
+          setEvents((events) => [...events, JSON.stringify(event)]);
+        },
+        error: (error) => console.log("error", error),
+        complete: () => console.log("complete"),
+      });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  return (
+    <>
+      <h1>Events:</h1>
+      <pre>{events.join("\n")}</pre>
+    </>
+  );
+}
+
+render(<App />, document.getElementById("root"));
